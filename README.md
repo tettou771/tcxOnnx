@@ -1,5 +1,9 @@
 # tcxOnnx
 
+> ⚠️ **Work in progress.** This addon is under active development and its API
+> may change without notice. Not yet released — use at your own risk until a
+> tagged `v0.1.0`.
+
 ONNX Runtime wrapper for TrussC. Load a `.onnx` model and run inference with a
 single, model-agnostic API. No OpenCV dependency — you feed it plain tensors.
 
