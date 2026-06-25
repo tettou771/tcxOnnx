@@ -1,0 +1,7 @@
+{
+  "description": "ONNX Runtime wrapper: load .onnx models and run inference (model-agnostic, no OpenCV)",
+  "author": "tettou771",
+  "license": "MIT",
+  "category": "machine-learning",
+  "keywords": ["onnx", "onnxruntime", "inference", "machine-learning", "ai"]
+}
