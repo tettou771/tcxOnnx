@@ -23,9 +23,13 @@ target_include_directories(${ADDON_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(${ADDON_NAME} PUBLIC TrussC)
 
 if(EMSCRIPTEN)
-    # wasm support is M5: build ORT as a static lib (--build_wasm_static_lib) or
-    # fall back to TFLite+XNNPACK for the web target. Not wired yet.
-    message(WARNING "tcxOnnx: wasm/Emscripten build is not supported yet (planned, M5)")
+    # Web backend: onnxruntime-web is loaded from a CDN at runtime and called via
+    # the EM_JS bridge in tcxOnnx.cpp (no native ORT lib to link). ASYNCIFY is
+    # enabled by trussc_app(), which lets the bridge await ort-web's async API.
+    # Keep the runtime string/heap helpers the EM_JS bodies use.
+    target_link_options(${ADDON_NAME} PUBLIC
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=['UTF8ToString','stringToUTF8','lengthBytesUTF8']")
+    message(STATUS "tcxOnnx: Emscripten/wasm backend (onnxruntime-web bridge)")
 else()
     # ----- Locate the vendored prebuilt ONNX Runtime --------------------------
     if(APPLE)
