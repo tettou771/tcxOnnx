@@ -341,46 +341,69 @@ void* OnnxModel::nativeSession() {
 
 #else
 // =============================================================================
-// WASM backend (onnxruntime-web via an EM_JS bridge).
+// WASM backend (onnxruntime-web via a NON-BLOCKING EM_JS bridge).
 //
-// ASYNCIFY (enabled by trussc_app for Emscripten) lets these synchronous C++
-// calls await ort-web's async create()/run(). State lives on Module.__ortx.
-// Models are read from the preloaded Emscripten FS (bin/data -> /data).
+// CRITICAL: ort-web's create()/run() are async. We must NOT await them from the
+// frame callback — Asyncify would unwind sokol_app's main loop and it never
+// resumes (the app freezes after one frame). So this bridge is fire-and-forget:
+// load()/run() kick the JS promise and return immediately; results are picked up
+// on a later frame by polling. Detection lags a few frames, which is fine.
+// State lives on Module.__ortx; models are read from the preloaded FS (/data).
+//   sessions[h] = { sess, feeds, inflight, hasResult, result }
 // =============================================================================
 
-// Inject ort-web from a CDN (once) and await it. Returns 1 when ready.
-EM_ASYNC_JS(int, tcxort_init, (), {
-    if (!Module.__ortx) Module.__ortx = { ready:false, sessions:[], feeds:{}, outputs:{} };
-    if (Module.__ortx.ready) return 1;
-    if (typeof ort === 'undefined') {
-        await new Promise(function(resolve){
-            var s = document.createElement('script');
-            s.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort.min.js';
-            s.onload = resolve; s.onerror = function(){ console.error('ort-web load failed'); resolve(); };
-            document.head.appendChild(s);
-        });
+// One-time, non-blocking: inject ort-web from a CDN. Sets ready on script load.
+EM_JS(void, tcxort_init, (), {
+    if (!Module.__ortx) Module.__ortx = { ready:false, loading:false, sessions:[] };
+    var X = Module.__ortx;
+    if (X.ready || X.loading) return;
+    var cfg = function(){
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+        ort.env.wasm.numThreads = 1;   // gh-pages can't set COOP/COEP -> single thread
+        X.ready = true;
+    };
+    if (typeof ort !== 'undefined') { cfg(); return; }
+    X.loading = true;
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort.min.js';
+    s.onload = cfg;
+    s.onerror = function(){ console.error('ort-web load failed'); X.loading = false; };
+    document.head.appendChild(s);
+});
+
+EM_JS(int, tcxort_ready, (), { return (Module.__ortx && Module.__ortx.ready) ? 1 : 0; });
+
+// Reserve a session slot and copy the model bytes. The actual async create is
+// DEFERRED until ort-web has loaded (see tcxort_session_ready) — calling
+// ort.* before the CDN script lands throws "ort is not defined" and an uncaught
+// error out of the frame callback would freeze the loop.
+EM_JS(int, tcxort_create_kick, (const unsigned char* data, int len), {
+    var slot = { sess:null, bytes:HEAPU8.slice(data, data + len), creating:false,
+                 feeds:{}, inflight:false, hasResult:false, result:null };
+    Module.__ortx.sessions.push(slot);
+    return Module.__ortx.sessions.length - 1;
+});
+
+// Polled each frame by isLoaded(): once ort-web is ready, kick the deferred
+// create; returns 1 only when the session object actually exists.
+EM_JS(int, tcxort_session_ready, (int h), {
+    var slot = Module.__ortx.sessions[h];
+    if (!slot) return 0;
+    if (slot.sess) return 1;
+    if (Module.__ortx.ready && slot.bytes && !slot.creating) {
+        slot.creating = true;
+        ort.InferenceSession.create(slot.bytes, { executionProviders:['wasm'] })
+            .then(function(s){ slot.sess = s; slot.bytes = null; })
+            .catch(function(e){ console.error('ort create failed', e); slot.creating = false; });
     }
-    if (typeof ort === 'undefined') return 0;
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
-    ort.env.wasm.numThreads = 1;   // gh-pages can't set COOP/COEP -> single thread
-    Module.__ortx.ready = true;
-    return 1;
+    return 0;
 });
 
-// Create a session from model bytes in the wasm heap. Returns index or -1.
-EM_ASYNC_JS(int, tcxort_create, (const unsigned char* data, int len), {
-    try {
-        var bytes = HEAPU8.slice(data, data + len);
-        var s = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'] });
-        Module.__ortx.sessions.push(s);
-        return Module.__ortx.sessions.length - 1;
-    } catch (e) { console.error('ort create failed', e); return -1; }
-});
-
-EM_JS(void, tcxort_clear_feeds, (), { Module.__ortx.feeds = {}; });
+EM_JS(void, tcxort_clear_feeds, (int h), { var slot = Module.__ortx.sessions[h]; if (slot) slot.feeds = {}; });
 
 // Stage one input. type: 0=f32, 1=i64, 2=i32, 3=u8.
-EM_JS(void, tcxort_set_input, (const char* namePtr, int type, const void* dataPtr, int count, const int* shapePtr, int ndim), {
+EM_JS(void, tcxort_set_input, (int h, const char* namePtr, int type, const void* dataPtr, int count, const int* shapePtr, int ndim), {
+    var slot = Module.__ortx.sessions[h]; if (!slot) return;
     var name = UTF8ToString(namePtr);
     var dims = [];
     for (var i = 0; i < ndim; i++) dims.push(HEAP32[(shapePtr >> 2) + i]);
@@ -389,27 +412,41 @@ EM_JS(void, tcxort_set_input, (const char* namePtr, int type, const void* dataPt
     else if (type === 1) t = new ort.Tensor('int64', new BigInt64Array(HEAP8.buffer, dataPtr, count).slice(), dims);
     else if (type === 2) t = new ort.Tensor('int32', HEAP32.slice(dataPtr >> 2, (dataPtr >> 2) + count), dims);
     else                 t = new ort.Tensor('uint8', HEAPU8.slice(dataPtr, dataPtr + count), dims);
-    Module.__ortx.feeds[name] = t;
+    slot.feeds[name] = t;
 });
 
-EM_ASYNC_JS(int, tcxort_run, (int session), {
-    try {
-        Module.__ortx.outputs = await Module.__ortx.sessions[session].run(Module.__ortx.feeds);
-        return 0;
-    } catch (e) { console.error('ort run failed', e); return -1; }
+// Kick an async run if the session is idle (non-blocking). Result stored on resolve.
+EM_JS(void, tcxort_kick, (int h), {
+    var slot = Module.__ortx.sessions[h];
+    if (!slot || !slot.sess || slot.inflight) return;
+    slot.inflight = true;
+    var feeds = slot.feeds;   // clear_feeds rebinds slot.feeds; this run keeps the old object
+    slot.sess.run(feeds)
+        .then(function(r){ slot.result = r; slot.hasResult = true; slot.inflight = false; })
+        .catch(function(e){ console.error('ort run failed', e); slot.inflight = false; });
 });
 
-EM_JS(int, tcxort_output_count, (), { return Object.keys(Module.__ortx.outputs).length; });
+EM_JS(int, tcxort_has_result, (int h), {
+    var slot = Module.__ortx.sessions[h];
+    return (slot && slot.hasResult) ? 1 : 0;
+});
 
-EM_JS(int, tcxort_output_name, (int idx, char* buf, int buflen), {
-    var k = Object.keys(Module.__ortx.outputs)[idx];
+EM_JS(int, tcxort_output_count, (int h), {
+    var slot = Module.__ortx.sessions[h];
+    return (slot && slot.result) ? Object.keys(slot.result).length : 0;
+});
+
+EM_JS(int, tcxort_output_name, (int h, int idx, char* buf, int buflen), {
+    var slot = Module.__ortx.sessions[h];
+    var k = (slot && slot.result) ? Object.keys(slot.result)[idx] : undefined;
     if (k === undefined) { if (buflen) HEAPU8[buf] = 0; return 0; }
     stringToUTF8(k, buf, buflen);
     return lengthBytesUTF8(k);
 });
 
-EM_JS(int, tcxort_output_type, (const char* namePtr), {
-    var o = Module.__ortx.outputs[UTF8ToString(namePtr)];
+EM_JS(int, tcxort_output_type, (int h, const char* namePtr), {
+    var slot = Module.__ortx.sessions[h];
+    var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
     if (!o) return 4;
     if (o.type === 'float32') return 0;
     if (o.type === 'int64')   return 1;
@@ -418,24 +455,28 @@ EM_JS(int, tcxort_output_type, (const char* namePtr), {
     return 4;
 });
 
-EM_JS(int, tcxort_output_ndim, (const char* namePtr), {
-    var o = Module.__ortx.outputs[UTF8ToString(namePtr)];
+EM_JS(int, tcxort_output_ndim, (int h, const char* namePtr), {
+    var slot = Module.__ortx.sessions[h];
+    var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
     return o ? o.dims.length : 0;
 });
 
-EM_JS(void, tcxort_output_shape, (const char* namePtr, int* outShape), {
-    var o = Module.__ortx.outputs[UTF8ToString(namePtr)];
+EM_JS(void, tcxort_output_shape, (int h, const char* namePtr, int* outShape), {
+    var slot = Module.__ortx.sessions[h];
+    var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
     if (!o) return;
     for (var i = 0; i < o.dims.length; i++) HEAP32[(outShape >> 2) + i] = o.dims[i];
 });
 
-EM_JS(int, tcxort_output_elems, (const char* namePtr), {
-    var o = Module.__ortx.outputs[UTF8ToString(namePtr)];
+EM_JS(int, tcxort_output_elems, (int h, const char* namePtr), {
+    var slot = Module.__ortx.sessions[h];
+    var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
     return o ? o.data.length : 0;
 });
 
-EM_JS(void, tcxort_output_data, (const char* namePtr, void* dst), {
-    var o = Module.__ortx.outputs[UTF8ToString(namePtr)];
+EM_JS(void, tcxort_output_data, (int h, const char* namePtr, void* dst), {
+    var slot = Module.__ortx.sessions[h];
+    var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
     if (!o) return;
     var d = o.data;
     if (o.type === 'float32')      HEAPF32.set(d, dst >> 2);
@@ -452,17 +493,20 @@ OnnxModel::OnnxModel(OnnxModel&&) noexcept = default;
 OnnxModel& OnnxModel::operator=(OnnxModel&&) noexcept = default;
 
 bool OnnxModel::load(const string& modelPath, const Options& opts) {
-    if (!tcxort_init()) { logError() << "[tcxOnnx] ort-web unavailable"; return false; }
+    tcxort_init();   // non-blocking; ort-web loads from CDN in the background
     std::ifstream f(modelPath, std::ios::binary);
     if (!f) { logError() << "[tcxOnnx] cannot open " << modelPath; return false; }
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    impl_->session = tcxort_create(bytes.data(), (int)bytes.size());
-    if (impl_->session < 0) { logError() << "[tcxOnnx] ort-web create failed: " << modelPath; return false; }
-    if (opts.verbose) logNotice() << "[tcxOnnx] loaded (ort-web): " << modelPath;
-    return true;
+    impl_->session = tcxort_create_kick(bytes.data(), (int)bytes.size());
+    if (opts.verbose) logNotice() << "[tcxOnnx] loading (ort-web, async): " << modelPath;
+    return impl_->session >= 0;
 }
 
-bool OnnxModel::isLoaded() const { return impl_ && impl_->session >= 0; }
+// The session loads asynchronously on web; isLoaded() reflects real readiness so
+// callers naturally skip inference until ort-web + the session are ready.
+bool OnnxModel::isLoaded() const {
+    return impl_ && impl_->session >= 0 && tcxort_ready() && tcxort_session_ready(impl_->session);
+}
 void OnnxModel::unload() { if (impl_) impl_->session = -1; }
 
 static int wasmTypeId(OnnxTensor::Type t) {
@@ -474,36 +518,41 @@ static OnnxTensor::Type fromWasmTypeId(int t) {
                  case 2: return OnnxTensor::Type::Int32; case 3: return OnnxTensor::Type::UInt8; default: return OnnxTensor::Type::Other; }
 }
 
+// Non-blocking: stage inputs + kick a run, then return the MOST RECENT completed
+// result (empty until the first one lands). The outputs lag the inputs by one
+// inference; for per-frame detection that few-frame latency is acceptable.
 map<string, OnnxTensor> OnnxModel::run(const map<string, OnnxTensor>& namedInputs, const vector<string>& outputNames) {
     map<string, OnnxTensor> result;
-    if (!isLoaded()) { logError() << "[tcxOnnx] run() on unloaded model"; return result; }
+    if (!isLoaded()) return result;   // ort-web / session still loading
+    const int h = impl_->session;
 
-    tcxort_clear_feeds();
+    tcxort_clear_feeds(h);
     for (const auto& kv : namedInputs) {
         const OnnxTensor& t = kv.second;
         std::vector<int32_t> shp(t.shape.begin(), t.shape.end());
-        tcxort_set_input(kv.first.c_str(), wasmTypeId(t.type),
+        tcxort_set_input(h, kv.first.c_str(), wasmTypeId(t.type),
                          t.bytes.data(), (int)t.count(), shp.data(), (int)shp.size());
     }
-    if (tcxort_run(impl_->session) != 0) return result;
+    tcxort_kick(h);                        // fire-and-forget
+    if (!tcxort_has_result(h)) return result;   // not ready yet -> caller keeps last
 
-    int n = tcxort_output_count();
+    int n = tcxort_output_count(h);
     for (int i = 0; i < n; i++) {
         char nameBuf[160] = {0};
-        tcxort_output_name(i, nameBuf, (int)sizeof(nameBuf));
+        tcxort_output_name(h, i, nameBuf, (int)sizeof(nameBuf));
         std::string name = nameBuf;
         if (!outputNames.empty() &&
             std::find(outputNames.begin(), outputNames.end(), name) == outputNames.end()) continue;
         OnnxTensor out;
-        out.type = fromWasmTypeId(tcxort_output_type(name.c_str()));
-        int ndim = tcxort_output_ndim(name.c_str());
+        out.type = fromWasmTypeId(tcxort_output_type(h, name.c_str()));
+        int ndim = tcxort_output_ndim(h, name.c_str());
         std::vector<int32_t> shp(ndim > 0 ? ndim : 0);
-        if (ndim > 0) tcxort_output_shape(name.c_str(), shp.data());
+        if (ndim > 0) tcxort_output_shape(h, name.c_str(), shp.data());
         out.shape.assign(shp.begin(), shp.end());
-        int elems = tcxort_output_elems(name.c_str());
+        int elems = tcxort_output_elems(h, name.c_str());
         size_t es = out.elementSize(); if (es == 0) es = 4;
         out.bytes.resize((size_t)elems * es);
-        if (elems > 0) tcxort_output_data(name.c_str(), out.bytes.data());
+        if (elems > 0) tcxort_output_data(h, name.c_str(), out.bytes.data());
         result[name] = std::move(out);
     }
     return result;
