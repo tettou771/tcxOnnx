@@ -203,7 +203,12 @@ bool Model::load(const string& modelPath, const Options& opts) {
         string cacheDir = opts.cacheDir.empty() ? defaultCacheDir() : opts.cacheDir;
         configureEP(so, opts, cacheDir);
 
-        impl_->session = make_unique<Ort::Session>(sharedEnv(), modelPath.c_str(), so);
+        // ORT takes the model path as ORTCHAR_T*: wchar_t on Windows, char
+        // elsewhere. std::filesystem::path::c_str() yields exactly that native
+        // type on each platform, so the same call compiles everywhere (passing
+        // modelPath.c_str() directly is a const char* and fails to compile on
+        // Windows, where the Ort::Session path overload wants const wchar_t*).
+        impl_->session = make_unique<Ort::Session>(sharedEnv(), std::filesystem::path(modelPath).c_str(), so);
 
         // Cache I/O names once.
         Ort::AllocatorWithDefaultOptions alloc;
