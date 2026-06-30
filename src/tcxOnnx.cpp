@@ -20,41 +20,42 @@
 #endif
 
 #include <cstdlib>
+#include <cstring>
 
 using namespace std;
 using namespace tc;
 
-namespace tcx {
+namespace tcx::onnx {
 
 // -----------------------------------------------------------------------------
 // Type mapping helpers
 // -----------------------------------------------------------------------------
 #ifndef __EMSCRIPTEN__
-static OnnxTensor::Type fromOrt(ONNXTensorElementDataType t) {
+static Tensor::Type fromOrt(ONNXTensorElementDataType t) {
     switch (t) {
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return OnnxTensor::Type::Float32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: return OnnxTensor::Type::Int64;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return OnnxTensor::Type::Int32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return OnnxTensor::Type::UInt8;
-        default: return OnnxTensor::Type::Other;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return Tensor::Type::Float32;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: return Tensor::Type::Int64;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return Tensor::Type::Int32;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return Tensor::Type::UInt8;
+        default: return Tensor::Type::Other;
     }
 }
 #endif
 
-static const char* typeName(OnnxTensor::Type t) {
+static const char* typeName(Tensor::Type t) {
     switch (t) {
-        case OnnxTensor::Type::Float32: return "float32";
-        case OnnxTensor::Type::Int64:   return "int64";
-        case OnnxTensor::Type::Int32:   return "int32";
-        case OnnxTensor::Type::UInt8:   return "uint8";
-        default:                        return "other";
+        case Tensor::Type::Float32: return "float32";
+        case Tensor::Type::Int64:   return "int64";
+        case Tensor::Type::Int32:   return "int32";
+        case Tensor::Type::UInt8:   return "uint8";
+        default:                    return "other";
     }
 }
 
 // -----------------------------------------------------------------------------
-// OnnxTensor
+// Tensor
 // -----------------------------------------------------------------------------
-size_t OnnxTensor::elementSize() const {
+size_t Tensor::elementSize() const {
     switch (type) {
         case Type::Float32: return 4;
         case Type::Int64:   return 8;
@@ -64,7 +65,7 @@ size_t OnnxTensor::elementSize() const {
     }
 }
 
-size_t OnnxTensor::count() const {
+size_t Tensor::count() const {
     size_t n = 1;
     for (int64_t d : shape) {
         if (d < 0) return 0;
@@ -74,8 +75,8 @@ size_t OnnxTensor::count() const {
 }
 
 template <typename T>
-static OnnxTensor makeTensor(OnnxTensor::Type type, vector<T> data, vector<int64_t> shape) {
-    OnnxTensor t;
+static Tensor makeTensor(Tensor::Type type, vector<T> data, vector<int64_t> shape) {
+    Tensor t;
     t.type = type;
     t.shape = std::move(shape);
     t.bytes.resize(data.size() * sizeof(T));
@@ -83,22 +84,39 @@ static OnnxTensor makeTensor(OnnxTensor::Type type, vector<T> data, vector<int64
     return t;
 }
 
-OnnxTensor OnnxTensor::f32(vector<float> d, vector<int64_t> s)   { return makeTensor(Type::Float32, std::move(d), std::move(s)); }
-OnnxTensor OnnxTensor::i64(vector<int64_t> d, vector<int64_t> s) { return makeTensor(Type::Int64,   std::move(d), std::move(s)); }
-OnnxTensor OnnxTensor::i32(vector<int32_t> d, vector<int64_t> s) { return makeTensor(Type::Int32,   std::move(d), std::move(s)); }
-OnnxTensor OnnxTensor::u8(vector<uint8_t> d, vector<int64_t> s)  { return makeTensor(Type::UInt8,   std::move(d), std::move(s)); }
+Tensor Tensor::f32(vector<float> d, vector<int64_t> s)   { return makeTensor(Type::Float32, std::move(d), std::move(s)); }
+Tensor Tensor::i64(vector<int64_t> d, vector<int64_t> s) { return makeTensor(Type::Int64,   std::move(d), std::move(s)); }
+Tensor Tensor::i32(vector<int32_t> d, vector<int64_t> s) { return makeTensor(Type::Int32,   std::move(d), std::move(s)); }
+Tensor Tensor::u8(vector<uint8_t> d, vector<int64_t> s)  { return makeTensor(Type::UInt8,   std::move(d), std::move(s)); }
 
 template <typename T>
-static vector<T> typedCopy(const OnnxTensor& t, OnnxTensor::Type expect) {
+static vector<T> typedCopy(const Tensor& t, Tensor::Type expect) {
     if (t.type != expect || t.bytes.empty()) return {};
     vector<T> out(t.bytes.size() / sizeof(T));
     memcpy(out.data(), t.bytes.data(), out.size() * sizeof(T));
     return out;
 }
 
-vector<float>   OnnxTensor::asFloat() const { return typedCopy<float>(*this, Type::Float32); }
-vector<int64_t> OnnxTensor::asInt64() const { return typedCopy<int64_t>(*this, Type::Int64); }
-vector<int32_t> OnnxTensor::asInt32() const { return typedCopy<int32_t>(*this, Type::Int32); }
+vector<float>   Tensor::asFloat() const { return typedCopy<float>(*this, Type::Float32); }
+vector<int64_t> Tensor::asInt64() const { return typedCopy<int64_t>(*this, Type::Int64); }
+vector<int32_t> Tensor::asInt32() const { return typedCopy<int32_t>(*this, Type::Int32); }
+vector<uint8_t> Tensor::asUInt8() const { return typedCopy<uint8_t>(*this, Type::UInt8); }
+
+// -----------------------------------------------------------------------------
+// Result
+// -----------------------------------------------------------------------------
+const Tensor& Result::get(const string& name) const {
+    static const Tensor kEmpty;
+    auto it = outputs_.find(name);
+    return it == outputs_.end() ? kEmpty : it->second;
+}
+
+vector<string> Result::names() const {
+    vector<string> ns;
+    ns.reserve(outputs_.size());
+    for (const auto& kv : outputs_) ns.push_back(kv.first);
+    return ns;
+}
 
 #ifndef __EMSCRIPTEN__
 // =============================================================================
@@ -129,19 +147,22 @@ static string defaultCacheDir() {
 // -----------------------------------------------------------------------------
 // PIMPL
 // -----------------------------------------------------------------------------
-struct OnnxModel::Impl {
+struct Model::Impl {
     unique_ptr<Ort::Session> session;
     // Cache input/output names so we don't re-allocate them every run.
     vector<string> inputNames;
     vector<string> outputNames;
+    // kick() runs synchronously on native and parks the result here.
+    Result pending;
+    bool hasPending = false;
 };
 
-OnnxModel::OnnxModel() : impl_(make_unique<Impl>()) {}
-OnnxModel::~OnnxModel() = default;
-OnnxModel::OnnxModel(OnnxModel&&) noexcept = default;
-OnnxModel& OnnxModel::operator=(OnnxModel&&) noexcept = default;
+Model::Model() : impl_(make_unique<Impl>()) {}
+Model::~Model() = default;
+Model::Model(Model&&) noexcept = default;
+Model& Model::operator=(Model&&) noexcept = default;
 
-static void configureEP(Ort::SessionOptions& opts, const OnnxModel::Options& o, const string& cacheDir) {
+static void configureEP(Ort::SessionOptions& opts, const Model::Options& o, const string& cacheDir) {
     const string& ep = o.executionProvider;
 #if defined(__APPLE__)
     if (ep == "Auto" || ep == "CoreML") {
@@ -173,7 +194,7 @@ static void configureEP(Ort::SessionOptions& opts, const OnnxModel::Options& o, 
     if (o.verbose) logNotice() << "[tcxOnnx] CPU EP";
 }
 
-bool OnnxModel::load(const string& modelPath, const Options& opts) {
+bool Model::load(const string& modelPath, const Options& opts) {
     try {
         Ort::SessionOptions so;
         so.SetIntraOpNumThreads(opts.numThreads);
@@ -188,6 +209,7 @@ bool OnnxModel::load(const string& modelPath, const Options& opts) {
         Ort::AllocatorWithDefaultOptions alloc;
         impl_->inputNames.clear();
         impl_->outputNames.clear();
+        impl_->hasPending = false;
         size_t ni = impl_->session->GetInputCount();
         for (size_t i = 0; i < ni; i++)
             impl_->inputNames.push_back(impl_->session->GetInputNameAllocated(i, alloc).get());
@@ -204,37 +226,39 @@ bool OnnxModel::load(const string& modelPath, const Options& opts) {
     }
 }
 
-bool OnnxModel::isLoaded() const { return impl_ && impl_->session != nullptr; }
+bool Model::isLoaded() const { return impl_ && impl_->session != nullptr; }
 
-void OnnxModel::unload() {
+void Model::unload() {
     if (impl_) {
         impl_->session.reset();
         impl_->inputNames.clear();
         impl_->outputNames.clear();
+        impl_->pending = Result{};
+        impl_->hasPending = false;
     }
 }
 
 // Build an Ort::Value that references (does not copy) the tensor's bytes.
-// The source OnnxTensor must outlive the Run() call.
-static Ort::Value makeOrtValue(const Ort::MemoryInfo& mem, const OnnxTensor& t) {
+// The source Tensor must outlive the Run() call.
+static Ort::Value makeOrtValue(const Ort::MemoryInfo& mem, const Tensor& t) {
     void* data = const_cast<uint8_t*>(t.bytes.data());
     size_t n = t.count();
     switch (t.type) {
-        case OnnxTensor::Type::Float32:
+        case Tensor::Type::Float32:
             return Ort::Value::CreateTensor<float>(mem, reinterpret_cast<float*>(data), n, t.shape.data(), t.shape.size());
-        case OnnxTensor::Type::Int64:
+        case Tensor::Type::Int64:
             return Ort::Value::CreateTensor<int64_t>(mem, reinterpret_cast<int64_t*>(data), n, t.shape.data(), t.shape.size());
-        case OnnxTensor::Type::Int32:
+        case Tensor::Type::Int32:
             return Ort::Value::CreateTensor<int32_t>(mem, reinterpret_cast<int32_t*>(data), n, t.shape.data(), t.shape.size());
-        case OnnxTensor::Type::UInt8:
+        case Tensor::Type::UInt8:
             return Ort::Value::CreateTensor<uint8_t>(mem, reinterpret_cast<uint8_t*>(data), n, t.shape.data(), t.shape.size());
         default:
             throw std::runtime_error("tcxOnnx: unsupported input tensor type");
     }
 }
 
-static OnnxTensor toTensor(Ort::Value& v) {
-    OnnxTensor out;
+static Tensor toTensor(Ort::Value& v) {
+    Tensor out;
     auto info = v.GetTensorTypeAndShapeInfo();
     out.shape = info.GetShape();
     out.type = fromOrt(info.GetElementType());
@@ -250,13 +274,13 @@ static OnnxTensor toTensor(Ort::Value& v) {
     return out;
 }
 
-map<string, OnnxTensor> OnnxModel::run(
-    const map<string, OnnxTensor>& namedInputs,
+Result Model::run(
+    const map<string, Tensor>& namedInputs,
     const vector<string>& outputNames) {
-    map<string, OnnxTensor> result;
+    map<string, Tensor> result;
     if (!isLoaded()) {
         logError() << "[tcxOnnx] run() called on an unloaded model";
-        return result;
+        return Result{};
     }
     try {
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -290,16 +314,49 @@ map<string, OnnxTensor> OnnxModel::run(
     } catch (const std::exception& e) {
         logError() << "[tcxOnnx] run error: " << e.what();
     }
-    return result;
+    return Result{std::move(result)};
 }
 
-static vector<OnnxModel::TensorInfo> collectInfo(Ort::Session* s, bool inputs) {
-    vector<OnnxModel::TensorInfo> infos;
+// Resolve the model's sole input name, or "" (logging) if there isn't exactly one.
+static string soleInputName(const vector<string>& names) {
+    if (names.size() == 1) return names[0];
+    logError() << "[tcxOnnx] single-input run()/kick() needs a model with exactly one input ("
+               << names.size() << " found) — pass a named-input map instead";
+    return {};
+}
+
+Result Model::run(const Tensor& singleInput) {
+    string name = soleInputName(inputNames());
+    if (name.empty()) return Result{};
+    return run({{name, singleInput}});
+}
+
+void Model::kick(const map<string, Tensor>& namedInputs, const vector<string>& outputNames) {
+    impl_->pending = run(namedInputs, outputNames);   // native: synchronous
+    impl_->hasPending = true;
+}
+
+void Model::kick(const Tensor& singleInput) {
+    string name = soleInputName(inputNames());
+    if (name.empty()) return;
+    kick({{name, singleInput}});
+}
+
+bool Model::hasResult() const { return impl_ && impl_->hasPending; }
+
+Result Model::takeResult() {
+    if (!impl_ || !impl_->hasPending) return Result{};
+    impl_->hasPending = false;
+    return std::move(impl_->pending);
+}
+
+static vector<Model::TensorInfo> collectInfo(Ort::Session* s, bool inputs) {
+    vector<Model::TensorInfo> infos;
     if (!s) return infos;
     Ort::AllocatorWithDefaultOptions alloc;
     size_t n = inputs ? s->GetInputCount() : s->GetOutputCount();
     for (size_t i = 0; i < n; i++) {
-        OnnxModel::TensorInfo ti;
+        Model::TensorInfo ti;
         ti.name = inputs ? s->GetInputNameAllocated(i, alloc).get()
                          : s->GetOutputNameAllocated(i, alloc).get();
         auto typeInfo = inputs ? s->GetInputTypeInfo(i) : s->GetOutputTypeInfo(i);
@@ -311,12 +368,14 @@ static vector<OnnxModel::TensorInfo> collectInfo(Ort::Session* s, bool inputs) {
     return infos;
 }
 
-vector<OnnxModel::TensorInfo> OnnxModel::inputInfo() const {
+vector<Model::TensorInfo> Model::inputInfo() const {
     return collectInfo(impl_ ? impl_->session.get() : nullptr, true);
 }
-vector<OnnxModel::TensorInfo> OnnxModel::outputInfo() const {
+vector<Model::TensorInfo> Model::outputInfo() const {
     return collectInfo(impl_ ? impl_->session.get() : nullptr, false);
 }
+vector<string> Model::inputNames() const { return impl_ ? impl_->inputNames : vector<string>{}; }
+vector<string> Model::outputNames() const { return impl_ ? impl_->outputNames : vector<string>{}; }
 
 static string shapeStr(const vector<int64_t>& shape) {
     string s;
@@ -327,7 +386,7 @@ static string shapeStr(const vector<int64_t>& shape) {
     return s;
 }
 
-void OnnxModel::printModelInfo() const {
+void Model::printModelInfo() const {
     if (!isLoaded()) { logNotice() << "[tcxOnnx] (no model loaded)"; return; }
     for (const auto& ti : inputInfo())
         logNotice() << "[tcxOnnx] input  " << ti.name << " " << typeName(ti.type) << " [" << shapeStr(ti.shape) << "]";
@@ -335,7 +394,7 @@ void OnnxModel::printModelInfo() const {
         logNotice() << "[tcxOnnx] output " << ti.name << " " << typeName(ti.type) << " [" << shapeStr(ti.shape) << "]";
 }
 
-void* OnnxModel::nativeSession() {
+void* Model::nativeSession() {
     return (impl_ && impl_->session) ? static_cast<void*>(impl_->session.get()) : nullptr;
 }
 
@@ -346,10 +405,11 @@ void* OnnxModel::nativeSession() {
 // CRITICAL: ort-web's create()/run() are async. We must NOT await them from the
 // frame callback — Asyncify would unwind sokol_app's main loop and it never
 // resumes (the app freezes after one frame). So this bridge is fire-and-forget:
-// load()/run() kick the JS promise and return immediately; results are picked up
-// on a later frame by polling. Detection lags a few frames, which is fine.
-// State lives on Module.__ortx; models are read from the preloaded FS (/data).
-//   sessions[h] = { sess, feeds, inflight, hasResult, result }
+// load()/kick() schedule the JS promise and return immediately; results are
+// picked up on a later frame by polling (hasResult/takeResult). Detection lags a
+// few frames, which is fine. State lives on Module.__ortx; models are read from
+// the preloaded FS (/data).
+//   sessions[h] = { sess, bytes, creating, feeds, inflight, hasResult, result }
 // =============================================================================
 
 // One-time, non-blocking: inject ort-web from a CDN. Sets ready on script load.
@@ -360,6 +420,10 @@ EM_JS(void, tcxort_init, (), {
     var cfg = function(){
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
         ort.env.wasm.numThreads = 1;   // gh-pages can't set COOP/COEP -> single thread
+        // ERROR level: post-processing-merged models legitimately emit dynamic
+        // output shapes that differ from the static graph, which would otherwise
+        // spam per-frame VerifyOutputSizes warnings (matches the native Ort::Env).
+        ort.env.logLevel = 'error';
         X.ready = true;
     };
     if (typeof ort !== 'undefined') { cfg(); return; }
@@ -392,7 +456,9 @@ EM_JS(int, tcxort_session_ready, (int h), {
     if (slot.sess) return 1;
     if (Module.__ortx.ready && slot.bytes && !slot.creating) {
         slot.creating = true;
-        ort.InferenceSession.create(slot.bytes, { executionProviders:['wasm'] })
+        // logSeverityLevel 3 = Error: suppress per-frame VerifyOutputSizes
+        // warnings from post-processing-merged models with dynamic outputs.
+        ort.InferenceSession.create(slot.bytes, { executionProviders:['wasm'], logSeverityLevel:3 })
             .then(function(s){ slot.sess = s; slot.bytes = null; })
             .catch(function(e){ console.error('ort create failed', e); slot.creating = false; });
     }
@@ -429,6 +495,14 @@ EM_JS(void, tcxort_kick, (int h), {
 EM_JS(int, tcxort_has_result, (int h), {
     var slot = Module.__ortx.sessions[h];
     return (slot && slot.hasResult) ? 1 : 0;
+});
+
+// Mark the current result consumed (takeResult). The result object is kept so a
+// later peek (run() most-recent semantics) still works, but hasResult flips off
+// until the next inference resolves.
+EM_JS(void, tcxort_consume, (int h), {
+    var slot = Module.__ortx.sessions[h];
+    if (slot) slot.hasResult = false;
 });
 
 EM_JS(int, tcxort_output_count, (int h), {
@@ -485,14 +559,34 @@ EM_JS(void, tcxort_output_data, (int h, const char* namePtr, void* dst), {
     else                           HEAPU8.set(d, dst);
 });
 
-struct OnnxModel::Impl { int session = -1; };
+// Model input/output names (available once the session exists). isInput: 1/0.
+EM_JS(int, tcxort_io_count, (int h, int isInput), {
+    var slot = Module.__ortx.sessions[h];
+    if (!slot || !slot.sess) return 0;
+    var arr = isInput ? slot.sess.inputNames : slot.sess.outputNames;
+    return arr ? arr.length : 0;
+});
 
-OnnxModel::OnnxModel() : impl_(make_unique<Impl>()) {}
-OnnxModel::~OnnxModel() = default;
-OnnxModel::OnnxModel(OnnxModel&&) noexcept = default;
-OnnxModel& OnnxModel::operator=(OnnxModel&&) noexcept = default;
+EM_JS(int, tcxort_io_name, (int h, int isInput, int idx, char* buf, int buflen), {
+    var slot = Module.__ortx.sessions[h];
+    var arr = (slot && slot.sess) ? (isInput ? slot.sess.inputNames : slot.sess.outputNames) : null;
+    var k = arr ? arr[idx] : undefined;
+    if (k === undefined) { if (buflen) HEAPU8[buf] = 0; return 0; }
+    stringToUTF8(k, buf, buflen);
+    return lengthBytesUTF8(k);
+});
 
-bool OnnxModel::load(const string& modelPath, const Options& opts) {
+struct Model::Impl {
+    int session = -1;
+    vector<string> kickOutputs;   // output filter remembered from kick()
+};
+
+Model::Model() : impl_(make_unique<Impl>()) {}
+Model::~Model() = default;
+Model::Model(Model&&) noexcept = default;
+Model& Model::operator=(Model&&) noexcept = default;
+
+bool Model::load(const string& modelPath, const Options& opts) {
     tcxort_init();   // non-blocking; ort-web loads from CDN in the background
     std::ifstream f(modelPath, std::ios::binary);
     if (!f) { logError() << "[tcxOnnx] cannot open " << modelPath; return false; }
@@ -504,46 +598,32 @@ bool OnnxModel::load(const string& modelPath, const Options& opts) {
 
 // The session loads asynchronously on web; isLoaded() reflects real readiness so
 // callers naturally skip inference until ort-web + the session are ready.
-bool OnnxModel::isLoaded() const {
+bool Model::isLoaded() const {
     return impl_ && impl_->session >= 0 && tcxort_ready() && tcxort_session_ready(impl_->session);
 }
-void OnnxModel::unload() { if (impl_) impl_->session = -1; }
+void Model::unload() { if (impl_) impl_->session = -1; }
 
-static int wasmTypeId(OnnxTensor::Type t) {
-    switch (t) { case OnnxTensor::Type::Float32: return 0; case OnnxTensor::Type::Int64: return 1;
-                 case OnnxTensor::Type::Int32: return 2; case OnnxTensor::Type::UInt8: return 3; default: return 0; }
+static int wasmTypeId(Tensor::Type t) {
+    switch (t) { case Tensor::Type::Float32: return 0; case Tensor::Type::Int64: return 1;
+                 case Tensor::Type::Int32: return 2; case Tensor::Type::UInt8: return 3; default: return 0; }
 }
-static OnnxTensor::Type fromWasmTypeId(int t) {
-    switch (t) { case 0: return OnnxTensor::Type::Float32; case 1: return OnnxTensor::Type::Int64;
-                 case 2: return OnnxTensor::Type::Int32; case 3: return OnnxTensor::Type::UInt8; default: return OnnxTensor::Type::Other; }
+static Tensor::Type fromWasmTypeId(int t) {
+    switch (t) { case 0: return Tensor::Type::Float32; case 1: return Tensor::Type::Int64;
+                 case 2: return Tensor::Type::Int32; case 3: return Tensor::Type::UInt8; default: return Tensor::Type::Other; }
 }
 
-// Non-blocking: stage inputs + kick a run, then return the MOST RECENT completed
-// result (empty until the first one lands). The outputs lag the inputs by one
-// inference; for per-frame detection that few-frame latency is acceptable.
-map<string, OnnxTensor> OnnxModel::run(const map<string, OnnxTensor>& namedInputs, const vector<string>& outputNames) {
-    map<string, OnnxTensor> result;
-    if (!isLoaded()) return result;   // ort-web / session still loading
-    const int h = impl_->session;
-
-    tcxort_clear_feeds(h);
-    for (const auto& kv : namedInputs) {
-        const OnnxTensor& t = kv.second;
-        std::vector<int32_t> shp(t.shape.begin(), t.shape.end());
-        tcxort_set_input(h, kv.first.c_str(), wasmTypeId(t.type),
-                         t.bytes.data(), (int)t.count(), shp.data(), (int)shp.size());
-    }
-    tcxort_kick(h);                        // fire-and-forget
-    if (!tcxort_has_result(h)) return result;   // not ready yet -> caller keeps last
-
+// Read the most-recent completed ort-web result into a Result, filtered by
+// `filter` (empty -> all outputs). Does NOT consume the result flag.
+static Result readWebOutputs(int h, const vector<string>& filter) {
+    map<string, Tensor> result;
     int n = tcxort_output_count(h);
     for (int i = 0; i < n; i++) {
         char nameBuf[160] = {0};
         tcxort_output_name(h, i, nameBuf, (int)sizeof(nameBuf));
         std::string name = nameBuf;
-        if (!outputNames.empty() &&
-            std::find(outputNames.begin(), outputNames.end(), name) == outputNames.end()) continue;
-        OnnxTensor out;
+        if (!filter.empty() &&
+            std::find(filter.begin(), filter.end(), name) == filter.end()) continue;
+        Tensor out;
         out.type = fromWasmTypeId(tcxort_output_type(h, name.c_str()));
         int ndim = tcxort_output_ndim(h, name.c_str());
         std::vector<int32_t> shp(ndim > 0 ? ndim : 0);
@@ -555,14 +635,107 @@ map<string, OnnxTensor> OnnxModel::run(const map<string, OnnxTensor>& namedInput
         if (elems > 0) tcxort_output_data(h, name.c_str(), out.bytes.data());
         result[name] = std::move(out);
     }
-    return result;
+    return Result{std::move(result)};
 }
 
-vector<OnnxModel::TensorInfo> OnnxModel::inputInfo() const { return {}; }
-vector<OnnxModel::TensorInfo> OnnxModel::outputInfo() const { return {}; }
-void OnnxModel::printModelInfo() const { logNotice() << "[tcxOnnx] (ort-web backend)"; }
-void* OnnxModel::nativeSession() { return nullptr; }
+void Model::kick(const map<string, Tensor>& namedInputs, const vector<string>& outputNames) {
+    if (!isLoaded()) return;   // ort-web / session still loading
+    const int h = impl_->session;
+    impl_->kickOutputs = outputNames;
+    tcxort_clear_feeds(h);
+    for (const auto& kv : namedInputs) {
+        const Tensor& t = kv.second;
+        std::vector<int32_t> shp(t.shape.begin(), t.shape.end());
+        tcxort_set_input(h, kv.first.c_str(), wasmTypeId(t.type),
+                         t.bytes.data(), (int)t.count(), shp.data(), (int)shp.size());
+    }
+    tcxort_kick(h);   // fire-and-forget
+}
+
+void Model::kick(const Tensor& singleInput) {
+    auto names = inputNames();
+    if (names.size() != 1) {
+        logError() << "[tcxOnnx] single-input kick() needs exactly one input ("
+                   << names.size() << " found)";
+        return;
+    }
+    kick({{names[0], singleInput}});
+}
+
+bool Model::hasResult() const {
+    return isLoaded() && tcxort_has_result(impl_->session);
+}
+
+Result Model::takeResult() {
+    if (!isLoaded() || !tcxort_has_result(impl_->session)) return Result{};
+    const int h = impl_->session;
+    Result r = readWebOutputs(h, impl_->kickOutputs);
+    tcxort_consume(h);
+    return r;
+}
+
+// Synchronous convenience is impossible on the web (we cannot block the frame
+// callback). run() kicks and returns the most-recent completed result (empty
+// until the first one lands), warning once so callers know to prefer the
+// non-blocking kick()/hasResult()/takeResult() API for realtime use.
+Result Model::run(const map<string, Tensor>& namedInputs, const vector<string>& outputNames) {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        logWarning() << "[tcxOnnx] run() is non-blocking on web (ort-web is async): it returns the "
+                        "most-recent completed result, lagging a few frames. Use kick()/hasResult()/"
+                        "takeResult() for realtime web code.";
+    }
+    if (!isLoaded()) return Result{};
+    const int h = impl_->session;
+    kick(namedInputs, outputNames);
+    if (!tcxort_has_result(h)) return Result{};   // not ready yet -> caller keeps last
+    return readWebOutputs(h, outputNames);
+}
+
+Result Model::run(const Tensor& singleInput) {
+    auto names = inputNames();
+    if (names.size() != 1) {
+        logError() << "[tcxOnnx] single-input run() needs exactly one input ("
+                   << names.size() << " found)";
+        return Result{};
+    }
+    return run({{names[0], singleInput}});
+}
+
+vector<Model::TensorInfo> Model::inputInfo() const {
+    vector<TensorInfo> infos;
+    for (const auto& n : inputNames()) infos.push_back({n, {}, Tensor::Type::Other});
+    return infos;
+}
+vector<Model::TensorInfo> Model::outputInfo() const {
+    vector<TensorInfo> infos;
+    for (const auto& n : outputNames()) infos.push_back({n, {}, Tensor::Type::Other});
+    return infos;
+}
+
+static vector<string> webIoNames(int h, int isInput) {
+    vector<string> names;
+    if (h < 0) return names;
+    int n = tcxort_io_count(h, isInput);
+    for (int i = 0; i < n; i++) {
+        char buf[160] = {0};
+        tcxort_io_name(h, isInput, i, buf, (int)sizeof(buf));
+        names.emplace_back(buf);
+    }
+    return names;
+}
+
+vector<string> Model::inputNames() const  { return impl_ ? webIoNames(impl_->session, 1) : vector<string>{}; }
+vector<string> Model::outputNames() const { return impl_ ? webIoNames(impl_->session, 0) : vector<string>{}; }
+
+void Model::printModelInfo() const {
+    if (!isLoaded()) { logNotice() << "[tcxOnnx] (ort-web backend, session not ready)"; return; }
+    for (const auto& n : inputNames())  logNotice() << "[tcxOnnx] input  " << n;
+    for (const auto& n : outputNames()) logNotice() << "[tcxOnnx] output " << n;
+}
+void* Model::nativeSession() { return nullptr; }
 
 #endif
 
-} // namespace tcx
+} // namespace tcx::onnx

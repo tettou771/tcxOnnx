@@ -26,5 +26,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
   repository) by `scripts/fetch_onnxruntime.sh`.
 
 ### Models
-Models are not part of this addon. If you ship MediaPipe-derived models
-(BlazeFace, FaceMesh, …) note they are Apache-2.0 licensed by Google.
+The addon itself is model-agnostic and ships no models for production use. If you
+bring MediaPipe-derived models (BlazeFace, FaceMesh, …) note they are Apache-2.0
+licensed by Google.
+
+#### Bundled example model: MNIST (`example-basic/bin/data/models/mnist-8.onnx`)
+- License: Apache-2.0
+- Source: ONNX Model Zoo — https://github.com/onnx/models (repo is Apache-2.0)
+- Producer: Microsoft CNTK 2.5.1 (opset 8). ~26 KB.
+- Bundled (not fetched) only as a tiny, license-clean fixture so `example-basic`
+  runs out of the box. The underlying MNIST dataset is by Y. LeCun et al.

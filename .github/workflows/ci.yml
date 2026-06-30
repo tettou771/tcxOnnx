@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']   # every branch: a push never silently skips CI. Narrow to [main] if CI is too heavy for this addon.
+    tags: ['v*']
+  pull_request:
+    branches: [main]   # mainly to cover fork PRs into main (your own branches already run via push)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  # Builds tcxOnnx + example-basic on macOS / Windows / Linux. Addon name and
+  # platforms (addon.json) are auto-detected. setup_script fetches the prebuilt
+  # ONNX Runtime for the runner OS (binaries are not committed) so the addon's
+  # CMake can link it — same hook tcxOrbbec uses for its SDK.
+  build:
+    uses: TrussC-org/ci-actions/.github/workflows/build-addon.yml@v1
+    with:
+      setup_script: |
+        set -euo pipefail
+        # Locate the addon's fetch script wherever the reusable workflow checked
+        # tcxOnnx out, then run it (it populates lib/ next to itself).
+        f=$(find "$GITHUB_WORKSPACE" -name fetch_onnxruntime.sh -path '*tcxOnnx*' | head -1)
+        [ -n "$f" ] || f=$(find "$GITHUB_WORKSPACE" -name fetch_onnxruntime.sh | head -1)
+        echo "tcxOnnx fetch script: ${f:-<none>}"
+        [ -n "$f" ] || { echo "::error::fetch_onnxruntime.sh not found"; exit 1; }
+        bash "$f"

@@ -1,7 +1,9 @@
 {
   "description": "ONNX Runtime wrapper: load .onnx models and run inference (model-agnostic, no OpenCV)",
+  "version": "0.2.0",
   "author": "tettou771",
   "license": "MIT",
   "category": "machine-learning",
+  "platforms": ["macos", "linux", "windows"],
   "keywords": ["onnx", "onnxruntime", "inference", "machine-learning", "ai"]
 }

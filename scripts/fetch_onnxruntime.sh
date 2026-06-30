@@ -45,8 +45,12 @@ curl -fsSL -o "$tmp" "$url"
 cd "$LIB_DIR"
 if [ "$ext" = "tgz" ]; then
   tar xzf "$tmp"
-else
+elif command -v unzip >/dev/null 2>&1; then
   unzip -q "$tmp"
+elif command -v 7z >/dev/null 2>&1; then
+  7z x "$tmp" >/dev/null            # Windows CI runners ship 7z, not always unzip
+else
+  echo "tcxOnnx: need 'unzip' or '7z' to extract $tmp" >&2; exit 1
 fi
 rm -f "$tmp"
 echo "tcxOnnx: extracted $dest"
