@@ -13,11 +13,11 @@ static constexpr float kBx = 520, kBy = 120;              // probability bars or
 // independent of the launch cwd).
 static std::string findFirstModel() {
     for (const std::string& rel : {std::string("models"), std::string("")}) {
-        std::string dir = getDataPath(rel);
+        fs::path dir = getDataPath(rel);
         std::error_code ec;
         if (!fs::is_directory(dir, ec)) continue;
         for (auto& e : fs::directory_iterator(dir, ec))
-            if (e.path().extension() == ".onnx") return e.path().string();
+            if (e.path().extension() == ".onnx") return pathToUtf8(e.path());
     }
     return "";
 }
@@ -41,7 +41,7 @@ void tcApp::setup() {
     auto ins = model_.inputNames(), outs = model_.outputNames();
     if (!ins.empty())  inputName_  = ins.front();
     if (!outs.empty()) outputName_ = outs.front();
-    status_ = "loaded " + fs::path(path).filename().string() + " - draw a digit";
+    status_ = "loaded " + pathToUtf8(utf8ToPath(path).filename()) + " - draw a digit";
 }
 
 void tcApp::update() {
