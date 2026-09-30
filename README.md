@@ -107,6 +107,12 @@ cmake --preset macos && cmake --build --preset macos
 ./bin/example-basic.app/Contents/MacOS/example-basic
 ```
 
+## Tests
+
+`tests/` is a headless harness (no window) that CI builds and runs on every
+push: it checks the input size validation against the bundled MNIST model and
+the helpers behind it. Run it locally with `trusscli run -p tests`.
+
 ## Platforms
 
 | Platform | Backend | Status |
