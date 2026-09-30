@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "tcxOnnx.h"
+#include "tcxOnnxInternal.h"
 
 #ifndef __EMSCRIPTEN__
 #include <onnxruntime_cxx_api.h>
@@ -22,6 +23,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 using namespace std;
 using namespace tc;
@@ -126,6 +128,67 @@ vector<float>   Tensor::asFloat() const { return typedCopy<float>(*this, Type::F
 vector<int64_t> Tensor::asInt64() const { return typedCopy<int64_t>(*this, Type::Int64); }
 vector<int32_t> Tensor::asInt32() const { return typedCopy<int32_t>(*this, Type::Int32); }
 vector<uint8_t> Tensor::asUInt8() const { return typedCopy<uint8_t>(*this, Type::UInt8); }
+
+// -----------------------------------------------------------------------------
+// Internal helpers (declared in tcxOnnxInternal.h for the tests)
+// -----------------------------------------------------------------------------
+namespace internal {
+
+bool tensorByteSize(const vector<int64_t>& shape, size_t elementSize, size_t& outBytes) {
+    // Same element count as Tensor::count(): an empty shape has no elements.
+    size_t n = shape.empty() ? 0 : 1;
+    for (int64_t d : shape) {
+        if (d < 0) return false;
+        if constexpr (sizeof(size_t) < sizeof(int64_t)) {   // wasm32
+            if (static_cast<uint64_t>(d) > numeric_limits<size_t>::max()) return false;
+        }
+        const size_t sd = static_cast<size_t>(d);
+        if (sd != 0 && n > numeric_limits<size_t>::max() / sd) return false;
+        n *= sd;
+    }
+    if (elementSize != 0 && n > numeric_limits<size_t>::max() / elementSize) return false;
+    outBytes = n * elementSize;
+    return true;
+}
+
+} // namespace internal
+
+static string shapeStr(const vector<int64_t>& shape) {
+    string s;
+    for (size_t i = 0; i < shape.size(); i++) {
+        if (i) s += ", ";
+        s += to_string(shape[i]);
+    }
+    return s;
+}
+
+// Check every input's data against its shape before any of them reaches ORT,
+// which reads count(shape) elements from the buffer whatever its real size.
+// Logs an error naming the first bad input and returns false.
+static bool checkInputs(const map<string, Tensor>& namedInputs) {
+    for (const auto& kv : namedInputs) {
+        const Tensor& t = kv.second;
+        const size_t es = t.elementSize();
+        if (es == 0) {
+            logError() << "[tcxOnnx] input '" << kv.first << "' has an unsupported element type ("
+                       << typeName(t.type) << "); inference not run";
+            return false;
+        }
+        size_t expected = 0;
+        if (!internal::tensorByteSize(t.shape, es, expected)) {
+            logError() << "[tcxOnnx] input '" << kv.first << "' has an invalid shape ["
+                       << shapeStr(t.shape) << "] (negative or too large dim); inference not run";
+            return false;
+        }
+        if (t.bytes.size() != expected) {
+            logError() << "[tcxOnnx] input '" << kv.first << "' has " << t.bytes.size()
+                       << " bytes, but shape [" << shapeStr(t.shape) << "] of " << typeName(t.type)
+                       << " needs " << expected << "; inference not run";
+            return false;
+        }
+    }
+    return true;
+}
 
 // -----------------------------------------------------------------------------
 // Result
@@ -321,6 +384,7 @@ Result Model::run(
         logError() << "[tcxOnnx] run() called on an unloaded model";
         return Result{};
     }
+    if (!checkInputs(namedInputs)) return Result{};
     try {
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
@@ -371,6 +435,7 @@ Result Model::run(const Tensor& singleInput) {
 }
 
 void Model::kick(const map<string, Tensor>& namedInputs, const vector<string>& outputNames) {
+    if (!checkInputs(namedInputs)) return;            // bad input: nothing is started
     impl_->pending = run(namedInputs, outputNames);   // native: synchronous
     impl_->hasPending = true;
 }
@@ -415,15 +480,6 @@ vector<Model::TensorInfo> Model::outputInfo() const {
 }
 vector<string> Model::inputNames() const { return impl_ ? impl_->inputNames : vector<string>{}; }
 vector<string> Model::outputNames() const { return impl_ ? impl_->outputNames : vector<string>{}; }
-
-static string shapeStr(const vector<int64_t>& shape) {
-    string s;
-    for (size_t i = 0; i < shape.size(); i++) {
-        if (i) s += ", ";
-        s += to_string(shape[i]);
-    }
-    return s;
-}
 
 void Model::printModelInfo() const {
     if (!isLoaded()) { logNotice() << "[tcxOnnx] (no model loaded)"; return; }
@@ -679,6 +735,7 @@ static Result readWebOutputs(int h, const vector<string>& filter) {
 
 void Model::kick(const map<string, Tensor>& namedInputs, const vector<string>& outputNames) {
     if (!isLoaded()) return;   // ort-web / session still loading
+    if (!checkInputs(namedInputs)) return;   // bad input: nothing is started
     const int h = impl_->session;
     impl_->kickOutputs = outputNames;
     tcxort_clear_feeds(h);
@@ -726,6 +783,7 @@ Result Model::run(const map<string, Tensor>& namedInputs, const vector<string>& 
                         "takeResult() for realtime web code.";
     }
     if (!isLoaded()) return Result{};
+    if (!checkInputs(namedInputs)) return Result{};   // not the last result either
     const int h = impl_->session;
     kick(namedInputs, outputNames);
     if (!tcxort_has_result(h)) return Result{};   // not ready yet -> caller keeps last

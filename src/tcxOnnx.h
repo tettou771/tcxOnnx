@@ -133,6 +133,9 @@ public:
     //     if (model.hasResult()) { auto r = model.takeResult(); use(r.get("out")); }
     //
     // outputNames selects which outputs to fetch; empty -> all outputs.
+    // Each input's bytes must match its shape (count() * elementSize()); a
+    // mismatched input is refused with a logged error and nothing is started
+    // (run() then returns an empty Result).
     void kick(const std::map<std::string, Tensor>& namedInputs,
               const std::vector<std::string>& outputNames = {});
     // Single-input convenience: uses the model's sole input name.

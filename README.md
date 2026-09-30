@@ -82,6 +82,10 @@ state machine over `kick`/`hasResult`/`takeResult` — see kandecrash's
   `isLoaded()` flips true once ort-web + the session are ready.
 - `Options` (`executionProvider` / `numThreads` / `cacheDir`) are honored on
   native; on web ort-web ignores them (it runs its own wasm/WebGPU backend).
+- Each input's `bytes` must match its shape (`count() * elementSize()`, no
+  negative dims). A mismatched input is refused before it reaches ONNX Runtime:
+  an error naming the input is logged, `run()` returns an empty `Result`, and
+  `kick()` starts nothing.
 - Post-processing (anchor decode, NMS, L2-normalize, …) is left to the caller —
   this addon returns the raw model outputs.
 - Escape hatch: `model.nativeSession()` returns the raw `Ort::Session*` if you
