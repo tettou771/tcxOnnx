@@ -40,6 +40,8 @@ struct Tensor {
     Type type = Type::Float32;
     std::vector<int64_t> shape;     // e.g. {1, 3, 192, 192}
     std::vector<uint8_t> bytes;     // raw element bytes, interpreted by `type`
+                                    // (an output of another ONNX type, e.g. float16 or
+                                    // double, has type Other and its own element size)
 
     bool empty() const { return bytes.empty(); }
     // Number of elements = product(shape). Returns 0 if any dim is negative.

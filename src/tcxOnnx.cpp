@@ -13,6 +13,7 @@
 #include <cuda_provider_factory.h>
 #endif
 #include <filesystem>
+#include <atomic>
 #else
 #include <emscripten.h>
 #include <fstream>
@@ -38,6 +39,30 @@ static Tensor::Type fromOrt(ONNXTensorElementDataType t) {
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return Tensor::Type::Int32;
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return Tensor::Type::UInt8;
         default: return Tensor::Type::Other;
+    }
+}
+
+// Bytes per element of an ORT tensor, so its data can be copied whole whatever
+// its Tensor::Type. 0 for element types whose data can't be copied as-is
+// (strings, packed sub-byte types, and types newer than this table).
+static size_t ortElementSize(ONNXTensorElementDataType t) {
+    switch (t) {
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:      return 1;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:     return 2;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:     return 4;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64:  return 8;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128: return 16;
+        default:                                       return 0;
     }
 }
 #endif
@@ -266,12 +291,21 @@ static Tensor toTensor(Ort::Value& v) {
     Tensor out;
     auto info = v.GetTensorTypeAndShapeInfo();
     out.shape = info.GetShape();
-    out.type = fromOrt(info.GetElementType());
+    const ONNXTensorElementDataType elemType = info.GetElementType();
+    out.type = fromOrt(elemType);
     size_t n = info.GetElementCount();
-    size_t es = out.elementSize();
+    // Copy with ORT's own element size: an output whose type maps to Other
+    // (float16, double, bool, int8, ...) still gets all of its bytes.
+    size_t es = ortElementSize(elemType);
     if (es == 0) {
-        // Unknown element type: copy raw bytes by best effort (float-sized fallback).
-        es = 4;
+        // Not copyable as raw bytes: return it empty, and warn once per type.
+        static std::atomic<uint64_t> warnedTypes{0};
+        const uint64_t bit = 1ull << ((unsigned)elemType & 63u);
+        if (!(warnedTypes.fetch_or(bit) & bit)) {
+            logWarning() << "[tcxOnnx] output element type " << (int)elemType
+                         << " is not supported; the tensor is returned empty";
+        }
+        return out;
     }
     const void* src = v.GetTensorRawData();
     out.bytes.resize(n * es);
