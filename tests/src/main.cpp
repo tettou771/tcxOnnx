@@ -90,8 +90,19 @@ static void testWebElementSize() {
 
 static void testModel() {
     // The MNIST model shipped with example-basic (input [1,1,28,28] float32).
-    const filesystem::path modelPath = filesystem::path(__FILE__).parent_path()
-        / ".." / ".." / "example-basic" / "bin" / "data" / "models" / "mnist-8.onnx";
+    // __FILE__ can be relative (CI builds from tests/), so also try the
+    // paths relative to the working directory and to the executable.
+    const filesystem::path rel = filesystem::path("example-basic") / "bin" / "data" / "models" / "mnist-8.onnx";
+    const filesystem::path candidates[] = {
+        filesystem::path(__FILE__).parent_path() / ".." / ".." / rel,
+        filesystem::path("..") / rel,
+        getExecutableDir() / ".." / ".." / rel,
+    };
+    filesystem::path modelPath = candidates[0];
+    for (const auto& c : candidates) {
+        error_code ec;
+        if (filesystem::exists(c, ec)) { modelPath = c; break; }
+    }
     onnx::Model model;
     const bool loaded = model.load(pathToUtf8(modelPath));
     check("model: MNIST loads", loaded);
