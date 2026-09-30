@@ -86,6 +86,10 @@ state machine over `kick`/`hasResult`/`takeResult` — see kandecrash's
   negative dims). A mismatched input is refused before it reaches ONNX Runtime:
   an error naming the input is logged, `run()` returns an empty `Result`, and
   `kick()` starts nothing.
+- Outputs of the other ONNX element types (float16, double, bool, int8, …) come
+  back as `Tensor::Type::Other` with their raw bytes at the type's own element
+  size. Types that can't be copied as raw bytes (string, …) come back empty,
+  with a warning once per type.
 - Post-processing (anchor decode, NMS, L2-normalize, …) is left to the caller —
   this addon returns the raw model outputs.
 - Escape hatch: `model.nativeSession()` returns the raw `Ort::Session*` if you

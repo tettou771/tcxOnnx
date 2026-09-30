@@ -19,6 +19,7 @@
 #include <emscripten.h>
 #include <fstream>
 #include <algorithm>
+#include <set>
 #endif
 
 #include <cstdlib>
@@ -149,6 +150,14 @@ bool tensorByteSize(const vector<int64_t>& shape, size_t elementSize, size_t& ou
     if (elementSize != 0 && n > numeric_limits<size_t>::max() / elementSize) return false;
     outBytes = n * elementSize;
     return true;
+}
+
+size_t webElementSize(const string& t) {
+    if (t == "bool" || t == "int8" || t == "uint8")        return 1;
+    if (t == "float16" || t == "int16" || t == "uint16")   return 2;
+    if (t == "float32" || t == "int32" || t == "uint32")   return 4;
+    if (t == "float64" || t == "int64" || t == "uint64")   return 8;
+    return 0;   // "string", packed "int4" / "uint4", or unknown
 }
 
 } // namespace internal
@@ -613,15 +622,13 @@ EM_JS(int, tcxort_output_name, (int h, int idx, char* buf, int buflen), {
     return lengthBytesUTF8(k);
 });
 
-EM_JS(int, tcxort_output_type, (int h, const char* namePtr), {
+// The output's ort-web element type ("float32", "float16", "string", ...), into buf.
+EM_JS(int, tcxort_output_type_name, (int h, const char* namePtr, char* buf, int buflen), {
     var slot = Module.__ortx.sessions[h];
     var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
-    if (!o) return 4;
-    if (o.type === 'float32') return 0;
-    if (o.type === 'int64')   return 1;
-    if (o.type === 'int32')   return 2;
-    if (o.type === 'uint8')   return 3;
-    return 4;
+    var k = o ? String(o.type) : "";
+    stringToUTF8(k, buf, buflen);
+    return lengthBytesUTF8(k);
 });
 
 EM_JS(int, tcxort_output_ndim, (int h, const char* namePtr), {
@@ -643,15 +650,19 @@ EM_JS(int, tcxort_output_elems, (int h, const char* namePtr), {
     return o ? o.data.length : 0;
 });
 
-EM_JS(void, tcxort_output_data, (int h, const char* namePtr, void* dst), {
+// Copy the output's raw element bytes (the typed array's own bytes, whatever its
+// element type) to dst, which C++ sized to `capacity` bytes. Copies only when the
+// data is a typed array of exactly `capacity` bytes, so it never writes past dst.
+// Returns the bytes copied, or -1 without writing anything (not a typed array,
+// e.g. a string tensor, or a byte size C++ didn't expect).
+EM_JS(int, tcxort_output_data, (int h, const char* namePtr, void* dst, int capacity), {
     var slot = Module.__ortx.sessions[h];
     var o = (slot && slot.result) ? slot.result[UTF8ToString(namePtr)] : null;
-    if (!o) return;
+    if (!o) return -1;
     var d = o.data;
-    if (o.type === 'float32')      HEAPF32.set(d, dst >> 2);
-    else if (o.type === 'int32')   HEAP32.set(d, dst >> 2);
-    else if (o.type === 'int64')   { var v = new BigInt64Array(HEAP8.buffer, dst, d.length); v.set(d); }
-    else                           HEAPU8.set(d, dst);
+    if (!ArrayBuffer.isView(d) || d instanceof DataView || d.byteLength !== capacity) return -1;
+    HEAPU8.set(new Uint8Array(d.buffer, d.byteOffset, d.byteLength), dst);
+    return capacity;
 });
 
 // Model input/output names (available once the session exists). isInput: 1/0.
@@ -702,9 +713,21 @@ static int wasmTypeId(Tensor::Type t) {
     switch (t) { case Tensor::Type::Float32: return 0; case Tensor::Type::Int64: return 1;
                  case Tensor::Type::Int32: return 2; case Tensor::Type::UInt8: return 3; default: return 0; }
 }
-static Tensor::Type fromWasmTypeId(int t) {
-    switch (t) { case 0: return Tensor::Type::Float32; case 1: return Tensor::Type::Int64;
-                 case 2: return Tensor::Type::Int32; case 3: return Tensor::Type::UInt8; default: return Tensor::Type::Other; }
+static Tensor::Type fromWebType(const string& t) {
+    if (t == "float32") return Tensor::Type::Float32;
+    if (t == "int64")   return Tensor::Type::Int64;
+    if (t == "int32")   return Tensor::Type::Int32;
+    if (t == "uint8")   return Tensor::Type::UInt8;
+    return Tensor::Type::Other;
+}
+
+// Warn once per ort-web type that an output of it comes back empty (as native does).
+static void warnUnsupportedWebOutput(const string& type) {
+    static std::set<string> warned;   // the web build is single-threaded
+    if (warned.insert(type).second) {
+        logWarning() << "[tcxOnnx] output element type '" << type
+                     << "' is not supported; the tensor is returned empty";
+    }
 }
 
 // Read the most-recent completed ort-web result into a Result, filtered by
@@ -719,15 +742,30 @@ static Result readWebOutputs(int h, const vector<string>& filter) {
         if (!filter.empty() &&
             std::find(filter.begin(), filter.end(), name) == filter.end()) continue;
         Tensor out;
-        out.type = fromWasmTypeId(tcxort_output_type(h, name.c_str()));
+        char typeBuf[32] = {0};
+        tcxort_output_type_name(h, name.c_str(), typeBuf, (int)sizeof(typeBuf));
+        const string type = typeBuf;
+        out.type = fromWebType(type);
         int ndim = tcxort_output_ndim(h, name.c_str());
         std::vector<int32_t> shp(ndim > 0 ? ndim : 0);
         if (ndim > 0) tcxort_output_shape(h, name.c_str(), shp.data());
         out.shape.assign(shp.begin(), shp.end());
         int elems = tcxort_output_elems(h, name.c_str());
-        size_t es = out.elementSize(); if (es == 0) es = 4;
-        out.bytes.resize((size_t)elems * es);
-        if (elems > 0) tcxort_output_data(h, name.c_str(), out.bytes.data());
+        // Copy with the type's own element size: an output whose type maps to
+        // Other (float16, float64, bool, int8, ...) still gets all of its bytes.
+        const size_t es = internal::webElementSize(type);
+        size_t nbytes = 0;
+        if (es == 0 || elems < 0 ||
+            !internal::tensorByteSize({(int64_t)elems}, es, nbytes) ||
+            nbytes > (size_t)numeric_limits<int>::max()) {
+            warnUnsupportedWebOutput(type);   // e.g. a string tensor: returned empty
+        } else if (nbytes > 0) {
+            out.bytes.resize(nbytes);
+            if (tcxort_output_data(h, name.c_str(), out.bytes.data(), (int)nbytes) != (int)nbytes) {
+                out.bytes.clear();            // bytes not as the type says: nothing copied
+                warnUnsupportedWebOutput(type);
+            }
+        }
         result[name] = std::move(out);
     }
     return Result{std::move(result)};

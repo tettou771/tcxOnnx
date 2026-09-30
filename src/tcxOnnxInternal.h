@@ -18,4 +18,9 @@ namespace tcx::onnx::internal {
 // size doesn't fit in size_t.
 bool tensorByteSize(const std::vector<int64_t>& shape, size_t elementSize, size_t& outBytes);
 
+// Bytes per element of an onnxruntime-web tensor type ("float16", "uint64",
+// "bool", ...). 0 for types whose data isn't a plain array of fixed-size
+// elements ("string", the packed "int4" / "uint4") and for unknown names.
+size_t webElementSize(const std::string& ortWebType);
+
 } // namespace tcx::onnx::internal
